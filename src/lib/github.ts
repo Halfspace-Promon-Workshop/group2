@@ -45,6 +45,11 @@ export class GitHubClient {
 
     this.rateLimitRemaining = remaining
     this.rateLimitResetAt = new Date(reset)
+    
+    // Log if rate limit is getting low
+    if (remaining < 10) {
+      console.warn(`[GitHub] Rate limit warning: ${remaining} requests remaining. Resets at ${this.rateLimitResetAt.toISOString()}`)
+    }
   }
 
   /**
@@ -110,6 +115,13 @@ export class GitHubClient {
         page++
       } catch (error: any) {
         if (error.status === 403) {
+          // Extract rate limit info from error response
+          const resetHeader = error.response?.headers?.['x-ratelimit-reset']
+          if (resetHeader) {
+            const resetTime = new Date(parseInt(resetHeader, 10) * 1000)
+            this.rateLimitResetAt = resetTime
+            this.rateLimitRemaining = 0
+          }
           throw new Error('Rate limited')
         }
         throw error
@@ -123,7 +135,13 @@ export class GitHubClient {
    * Searches GitHub repositories
    */
   async searchRepositories(query: string, createdAfter?: Date): Promise<GitHubSearchResult[]> {
+    // For repository search, add qualifiers to search in name, description, and readme
+    // If query doesn't already have qualifiers, add them
     let searchQuery = query
+    if (!query.includes('in:') && !query.includes('user:') && !query.includes('org:')) {
+      // Add qualifiers to search in name, description, and readme
+      searchQuery = `${query} in:name,description,readme`
+    }
     if (createdAfter) {
       const dateStr = createdAfter.toISOString().split('T')[0]
       searchQuery += ` created:>${dateStr}`
@@ -135,6 +153,7 @@ export class GitHubClient {
 
     while (page <= maxPages) {
       try {
+        console.log(`[GitHub] Searching repositories with query: "${searchQuery}" (page ${page})`)
         const response = await this.octokit.rest.search.repos({
           q: searchQuery,
           per_page: 100,
@@ -144,6 +163,7 @@ export class GitHubClient {
         })
 
         this.updateRateLimit(response.headers)
+        console.log(`[GitHub] Repository search returned ${response.data.total_count} total results, ${response.data.items.length} on this page`)
 
         if (response.data.items.length === 0) break
 
@@ -170,6 +190,13 @@ export class GitHubClient {
         page++
       } catch (error: any) {
         if (error.status === 403) {
+          // Extract rate limit info from error response
+          const resetHeader = error.response?.headers?.['x-ratelimit-reset']
+          if (resetHeader) {
+            const resetTime = new Date(parseInt(resetHeader, 10) * 1000)
+            this.rateLimitResetAt = resetTime
+            this.rateLimitRemaining = 0
+          }
           throw new Error('Rate limited')
         }
         throw error
@@ -227,6 +254,13 @@ export class GitHubClient {
         page++
       } catch (error: any) {
         if (error.status === 403) {
+          // Extract rate limit info from error response
+          const resetHeader = error.response?.headers?.['x-ratelimit-reset']
+          if (resetHeader) {
+            const resetTime = new Date(parseInt(resetHeader, 10) * 1000)
+            this.rateLimitResetAt = resetTime
+            this.rateLimitRemaining = 0
+          }
           throw new Error('Rate limited')
         }
         throw error
@@ -284,6 +318,13 @@ export class GitHubClient {
         page++
       } catch (error: any) {
         if (error.status === 403) {
+          // Extract rate limit info from error response
+          const resetHeader = error.response?.headers?.['x-ratelimit-reset']
+          if (resetHeader) {
+            const resetTime = new Date(parseInt(resetHeader, 10) * 1000)
+            this.rateLimitResetAt = resetTime
+            this.rateLimitRemaining = 0
+          }
           throw new Error('Rate limited')
         }
         throw error

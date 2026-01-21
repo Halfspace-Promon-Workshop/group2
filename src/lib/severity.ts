@@ -33,6 +33,29 @@ export function calculateSeverity(result: GitHubSearchResult): SeverityScore {
   const recencyScore = calculateRecencyScore(result, reasons)
   score += recencyScore
 
+  // Special case: If repository name contains product name ("Shield" or "Promon") + dangerous keywords,
+  // guarantee minimum severity of 4 (very high risk)
+  // This check must happen BEFORE severity mapping to ensure it's applied
+  const repoName = result.repository.toLowerCase()
+  const hasShieldInName = repoName.includes('shield')
+  const hasPromonInName = repoName.includes('promon')
+  const dangerousKeywords = ['hack', 'bypass', 'exploit', 'poc', 'cve', 'crack', 'workaround', 'disable', 'hook', 'frida', 'root', 'instrumentation', 'patch', 'modify', 'cracked', 'hacked', 'bypassed']
+  const foundKeywords = dangerousKeywords.filter((keyword) => repoName.includes(keyword))
+  
+  // Check for product name (Shield or Promon) + dangerous keywords BEFORE calculating final severity
+  const isHighRiskRepo = (hasShieldInName || hasPromonInName) && foundKeywords.length > 0
+  
+  // Force high severity if product name (Shield or Promon) + dangerous keywords found
+  if (isHighRiskRepo) {
+    // Guarantee minimum severity 4 for product name + dangerous keywords
+    // Set score to at least 61 to ensure severity 4
+    if (score < 61) {
+      score = 61 // Force to severity 4 threshold
+      const productName = hasShieldInName ? 'Shield' : 'Promon'
+      reasons.unshift(`CRITICAL: Repository name contains '${productName}' with dangerous keywords (${foundKeywords.join(', ')}) - guaranteed high severity`)
+    }
+  }
+
   // Map to 1-5 severity
   let severity: number
   if (score <= 20) severity = 1
@@ -40,6 +63,18 @@ export function calculateSeverity(result: GitHubSearchResult): SeverityScore {
   else if (score <= 60) severity = 3
   else if (score <= 80) severity = 4
   else severity = 5
+
+  // Final override: If product name (Shield or Promon) + dangerous keywords, ALWAYS force severity to 4
+  // This is a safety net to ensure it works even if score calculation had issues
+  if (isHighRiskRepo) {
+    severity = 4
+    // Update the explanation to reflect the override
+    const productName = hasShieldInName ? 'Shield' : 'Promon'
+    const criticalReason = `CRITICAL: Repository name contains '${productName}' with dangerous keywords (${foundKeywords.join(', ')}) - severity forced to 4`
+    if (!reasons[0]?.includes('CRITICAL')) {
+      reasons.unshift(criticalReason)
+    }
+  }
 
   // Generate explanation
   const primaryReason = reasons[0] || 'No significant indicators found'
@@ -150,6 +185,54 @@ function calculateRepoScore(result: GitHubSearchResult, reasons: string[]): numb
   const description = (result.description || '').toLowerCase()
   const topics = (result.topics || []).map((t) => t.toLowerCase())
 
+  // Check if repository name contains product names (case-insensitive)
+  const hasShieldInName = repoName.includes('shield')
+  const hasPromonInName = repoName.includes('promon')
+
+  // Dangerous keywords in repository name
+  const dangerousKeywords = [
+    'hack',
+    'bypass',
+    'exploit',
+    'poc',
+    'cve',
+    'crack',
+    'workaround',
+    'disable',
+    'hook',
+    'frida',
+    'root',
+    'instrumentation',
+    'patch',
+    'modify',
+    'cracked',
+    'hacked',
+    'bypassed',
+  ]
+
+  // Check for dangerous keywords in repository name
+  const foundKeywords = dangerousKeywords.filter((keyword) => repoName.includes(keyword))
+
+  if (foundKeywords.length > 0) {
+    // If product name (Shield or Promon) is also in the name, this is highly suspicious
+    if (hasShieldInName || hasPromonInName) {
+      // Very high severity: Product name + dangerous keywords in repo name
+      // This is a strong indicator of malicious intent
+      const productName = hasShieldInName ? 'Shield' : 'Promon'
+      score += 35
+      reasons.push(`Repository name contains '${productName}' with dangerous keywords: ${foundKeywords.join(', ')}`)
+    } else {
+      // Medium severity: Dangerous keywords in repo name
+      score += 12
+      reasons.push(`Repository name contains dangerous keywords: ${foundKeywords.join(', ')}`)
+    }
+  } else if (hasShieldInName || hasPromonInName) {
+    // Product name in name but no dangerous keywords - still noteworthy
+    const productName = hasShieldInName ? 'Shield' : 'Promon'
+    score += 5
+    reasons.push(`Repository name contains '${productName}'`)
+  }
+
   // Security research repos
   const securityTopics = ['security', 'exploit', 'pentest', 'malware']
   const hasSecurityTopic = topics.some((t) => securityTopics.includes(t))
@@ -158,8 +241,10 @@ function calculateRepoScore(result: GitHubSearchResult, reasons: string[]): numb
     reasons.push('Repository tagged with security topics')
   }
 
+  // Legacy check for exploit terms (keeping for backward compatibility)
   const exploitInName = ['exploit', 'poc', 'cve'].some((term) => repoName.includes(term))
-  if (exploitInName) {
+  if (exploitInName && foundKeywords.length === 0) {
+    // Only add if not already caught by dangerous keywords check
     score += 8
     reasons.push('Repository name suggests exploit/PoC')
   }
@@ -175,7 +260,8 @@ function calculateRepoScore(result: GitHubSearchResult, reasons: string[]): numb
     score -= 5
   }
 
-  return Math.min(20, Math.max(-10, score))
+  // Increased max to allow higher scores for dangerous repo names
+  return Math.min(40, Math.max(-10, score))
 }
 
 function calculateContentScore(result: GitHubSearchResult, reasons: string[]): number {

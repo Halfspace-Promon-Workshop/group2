@@ -109,8 +109,20 @@ export default function MonitorDetailPage() {
                 </div>
               )}
               {monitor.errorMessage && (
-                <div className="text-red-600">
-                  <span className="font-medium">Error:</span> {monitor.errorMessage}
+                <div className={`p-3 border rounded ${
+                  monitor.errorMessage.includes('Rate limit') 
+                    ? 'bg-yellow-50 border-yellow-200 text-yellow-800' 
+                    : 'bg-red-50 border-red-200 text-red-800'
+                }`}>
+                  <span className="font-medium">
+                    {monitor.errorMessage.includes('Rate limit') ? '⚠️ Rate Limit: ' : 'Error: '}
+                  </span>
+                  {monitor.errorMessage}
+                  {monitor.errorMessage.includes('Rate limit') && (
+                    <p className="text-sm mt-2 text-yellow-700">
+                      The monitor will automatically resume when the rate limit resets.
+                    </p>
+                  )}
                 </div>
               )}
             </div>
@@ -146,6 +158,29 @@ export default function MonitorDetailPage() {
           )}
 
           <div className="flex gap-2">
+            <Button
+              variant="default"
+              onClick={async () => {
+                try {
+                  const res = await fetch(`/api/monitors/${monitor.id}/trigger`, {
+                    method: 'POST',
+                    credentials: 'include',
+                  })
+                  const data = await res.json()
+                  if (res.ok) {
+                    alert('Monitor triggered! Check the Results page in a few moments.')
+                    refetch()
+                  } else {
+                    alert(data.error || 'Failed to trigger monitor')
+                  }
+                } catch (error) {
+                  alert('An error occurred')
+                }
+              }}
+              disabled={!monitor.enabled}
+            >
+              {monitor.enabled ? 'Run Now' : 'Enable Monitor First'}
+            </Button>
             <Link href={`/results?monitorId=${monitor.id}`}>
               <Button variant="outline">View Results</Button>
             </Link>

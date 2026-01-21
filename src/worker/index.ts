@@ -4,42 +4,18 @@ import { decryptToken } from '../lib/encryption'
 import { GitHubClient } from '../lib/github'
 import { calculateSeverity } from '../lib/severity'
 import { sendPushNotification } from './notifications'
+import { monitorQueue, notificationQueue, redisConnection } from '../lib/queue'
 
-// Parse Redis URL for BullMQ connection
-const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379'
-const url = new URL(redisUrl)
-const redisConnection = {
-  host: url.hostname,
-  port: parseInt(url.port || '6379', 10),
-}
-
-export const monitorQueue = new Queue('monitor-execution', {
-  connection: redisConnection,
-  defaultJobOptions: {
-    attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 60000, // 1 minute
-    },
-    removeOnComplete: {
-      age: 86400, // 24 hours
-    },
-    removeOnFail: {
-      age: 604800, // 7 days
-    },
-  },
-})
-
-export const notificationQueue = new Queue('notifications', {
-  connection: redisConnection,
-})
+// Re-export for backward compatibility
+export { monitorQueue, notificationQueue }
 
 const worker = new Worker(
   'monitor-execution',
   async (job) => {
     const { monitorId } = job.data
+    const isManualTrigger = job.id?.includes('manual') || false
 
-    console.log(`Processing monitor ${monitorId}`)
+    console.log(`Processing monitor ${monitorId}${isManualTrigger ? ' (manual trigger)' : ''}`)
 
     // Get monitor
     const monitor = await prisma.monitor.findUnique({
@@ -54,29 +30,80 @@ const worker = new Worker(
       return
     }
 
-    // Get user's GitHub token
-    if (!monitor.user.encryptedGithubToken || !monitor.user.githubTokenIv) {
-      throw new Error('User has no GitHub token configured')
+    // Create monitor run early so we always have a record to update
+    let run
+    try {
+      run = await prisma.monitorRun.create({
+        data: {
+          monitorId: monitor.id,
+          status: 'running',
+        },
+      })
+    } catch (error: any) {
+      console.error(`Monitor ${monitorId}: Failed to create run record:`, error)
+      // Continue anyway - we'll handle errors later
     }
 
-    const githubToken = decryptToken(
-      monitor.user.encryptedGithubToken,
-      monitor.user.githubTokenIv,
-      monitor.user.id
-    )
-
-    // Create GitHub client
-    const github = new GitHubClient(githubToken)
-
-    // Create monitor run
-    const run = await prisma.monitorRun.create({
-      data: {
-        monitorId: monitor.id,
-        status: 'running',
-      },
-    })
-
     try {
+      // Get user's GitHub token
+      if (!monitor.user.encryptedGithubToken || !monitor.user.githubTokenIv) {
+        const errorMsg = `Monitor ${monitorId}: User ${monitor.user.email} has no GitHub token configured. Please add a GitHub token in Settings.`
+        console.error(errorMsg)
+        
+        // Update run if it exists
+        if (run) {
+          try {
+            await prisma.monitorRun.update({
+              where: { id: run.id },
+              data: {
+                status: 'failed',
+                completedAt: new Date(),
+                errorMessage: 'GitHub token not configured',
+              },
+            })
+          } catch (updateError: any) {
+            console.error(`Monitor ${monitorId}: Failed to update run:`, updateError)
+          }
+        }
+        
+        // Update monitor status
+        await prisma.monitor.update({
+          where: { id: monitorId },
+          data: {
+            status: 'error',
+            errorMessage: 'GitHub token not configured. Please add a token in Settings.',
+          },
+        })
+        
+        throw new Error(errorMsg)
+      }
+
+      const githubToken = decryptToken(
+        monitor.user.encryptedGithubToken,
+        monitor.user.githubTokenIv,
+        monitor.user.id
+      )
+
+      // Create GitHub client
+      const github = new GitHubClient(githubToken)
+      
+      // Clear any previous rate limit errors if enough time has passed
+      // (Rate limits reset every hour, so if error is older than 1 hour, clear it)
+      if (monitor.status === 'error' && monitor.errorMessage?.includes('Rate limit')) {
+        const errorAge = monitor.updatedAt ? Date.now() - monitor.updatedAt.getTime() : 0
+        // If error is older than 70 minutes (rate limits reset hourly), clear it
+        if (errorAge > 70 * 60 * 1000) {
+          console.log(`Monitor ${monitorId}: Clearing old rate limit error`)
+          await prisma.monitor.update({
+            where: { id: monitorId },
+            data: {
+              status: 'active',
+              errorMessage: null,
+            },
+          })
+        }
+      }
+      
       // Build query
       let query = ''
       if (monitor.queryType === 'keyword') {
@@ -90,13 +117,34 @@ const worker = new Worker(
 
       const searchSurfaces = monitor.searchSurfaces as string[]
       const lastRunAt = monitor.lastRunAt
-      const createdAfter = lastRunAt && (Date.now() - lastRunAt.getTime()) < 90 * 24 * 60 * 60 * 1000 ? lastRunAt : undefined
+      
+      // For manual triggers, don't use date filter to ensure we find newly created repositories
+      // For scheduled runs, only use createdAfter filter if last run was recent (within 90 days)
+      // For first run or old runs, don't filter by date to get all results
+      let createdAfter: Date | undefined
+      if (isManualTrigger) {
+        console.log(`Monitor ${monitorId}: Manual trigger - no date filter to find all results including new repositories`)
+        createdAfter = undefined
+      } else {
+        createdAfter = lastRunAt && (Date.now() - lastRunAt.getTime()) < 90 * 24 * 60 * 60 * 1000 ? lastRunAt : undefined
+      }
+      
+      if (createdAfter) {
+        console.log(`Monitor ${monitorId}: Filtering results created after ${createdAfter.toISOString()}`)
+      } else {
+        console.log(`Monitor ${monitorId}: No date filter - searching all results`)
+      }
 
       // Search each surface
       const allResults: any[] = []
+      console.log(`Monitor ${monitorId}: Searching with query: "${query}"`)
+      console.log(`Monitor ${monitorId}: Search surfaces: ${searchSurfaces.join(', ')}`)
+      
       for (const surface of searchSurfaces) {
         try {
           let results: any[] = []
+          console.log(`Monitor ${monitorId}: Searching ${surface}...`)
+          
           if (surface === 'code') {
             results = await github.searchCode(query, createdAfter)
           } else if (surface === 'repo') {
@@ -107,39 +155,49 @@ const worker = new Worker(
             results = await github.searchPullRequests(query, createdAfter)
           }
 
+          console.log(`Monitor ${monitorId}: Found ${results.length} results in ${surface}`)
           allResults.push(...results)
         } catch (error: any) {
           if (error.message === 'Rate limited') {
             const rateLimit = github.getRateLimit()
-            await prisma.monitorRun.update({
-              where: { id: run.id },
-              data: {
-                status: 'rate_limited',
-                rateLimitRemaining: rateLimit.remaining,
-                rateLimitResetAt: rateLimit.resetAt,
-                errorMessage: 'Rate limited by GitHub API',
-              },
-            })
+            try {
+              await prisma.monitorRun.update({
+                where: { id: run.id },
+                data: {
+                  status: 'rate_limited',
+                  rateLimitRemaining: rateLimit.remaining,
+                  rateLimitResetAt: rateLimit.resetAt,
+                  errorMessage: 'Rate limited by GitHub API',
+                },
+              })
+            } catch (updateError: any) {
+              console.error(`Monitor ${monitorId}: Failed to update run for rate limit:`, updateError)
+            }
 
             // Reschedule for after rate limit reset
-            const resetTime = rateLimit.resetAt.getTime() - Date.now() + 60000 // 1 minute buffer
+            const resetTimeDate = new Date(rateLimit.resetAt)
+            const resetTimeDelay = resetTimeDate.getTime() - Date.now() + 60000 // 1 minute buffer
+            
             await monitorQueue.add(
               `monitor-${monitorId}`,
               { monitorId },
               {
-                delay: resetTime,
+                delay: resetTimeDelay,
               }
             )
 
+            const waitMinutes = Math.ceil((resetTimeDate.getTime() - Date.now()) / 60000)
+            
             await prisma.monitor.update({
               where: { id: monitorId },
               data: {
                 status: 'error',
-                errorMessage: 'Rate limited',
-                nextRunAt: rateLimit.resetAt,
+                errorMessage: `Rate limited. ${rateLimit.remaining} requests remaining. Resets in ~${waitMinutes} minutes (${resetTimeDate.toLocaleTimeString()})`,
+                nextRunAt: resetTimeDate,
               },
             })
 
+            console.log(`Monitor ${monitorId}: Rate limited. Will retry after ${resetTimeDate.toISOString()}`)
             return
           }
           throw error
@@ -229,30 +287,37 @@ const worker = new Worker(
       }
 
       // Update run
-      const rateLimit = github.getRateLimit()
-      await prisma.monitorRun.update({
-        where: { id: run.id },
-        data: {
-          status: 'completed',
-          completedAt: new Date(),
-          resultsFound: allResults.length,
-          resultsNew: newCount,
-          rateLimitRemaining: rateLimit.remaining,
-          rateLimitResetAt: rateLimit.resetAt,
-        },
-      })
+      if (run) {
+        try {
+          const rateLimit = github.getRateLimit()
+          await prisma.monitorRun.update({
+            where: { id: run.id },
+            data: {
+              status: 'completed',
+              completedAt: new Date(),
+              resultsFound: allResults.length,
+              resultsNew: newCount,
+              rateLimitRemaining: rateLimit.remaining,
+              rateLimitResetAt: rateLimit.resetAt,
+            },
+          })
+        } catch (updateError: any) {
+          console.error(`Monitor ${monitorId}: Failed to update run on completion:`, updateError)
+        }
+      }
 
       // Update monitor
       const nextRunAt = new Date()
       nextRunAt.setMinutes(nextRunAt.getMinutes() + monitor.intervalMinutes)
 
+      // Clear any previous errors on successful completion
       await prisma.monitor.update({
         where: { id: monitorId },
         data: {
           lastRunAt: new Date(),
           nextRunAt,
           status: 'active',
-          errorMessage: null,
+          errorMessage: null, // Clear any previous errors including rate limit errors
         },
       })
 
@@ -263,22 +328,47 @@ const worker = new Worker(
     } catch (error: any) {
       console.error(`Monitor ${monitorId} failed:`, error)
 
-      await prisma.monitorRun.update({
-        where: { id: run.id },
-        data: {
-          status: 'failed',
-          completedAt: new Date(),
-          errorMessage: error.message,
-        },
-      })
+      // Only update run if it was created
+      if (run) {
+        try {
+          await prisma.monitorRun.update({
+            where: { id: run.id },
+            data: {
+              status: 'failed',
+              completedAt: new Date(),
+              errorMessage: error.message,
+            },
+          })
+        } catch (updateError: any) {
+          console.error(`Monitor ${monitorId}: Failed to update run record:`, updateError)
+          // Try to create a new run record for tracking
+          try {
+            await prisma.monitorRun.create({
+              data: {
+                monitorId: monitor.id,
+                status: 'failed',
+                completedAt: new Date(),
+                errorMessage: error.message,
+              },
+            })
+          } catch (createError: any) {
+            console.error(`Monitor ${monitorId}: Failed to create run record for error:`, createError)
+          }
+        }
+      }
 
-      await prisma.monitor.update({
-        where: { id: monitorId },
-        data: {
-          status: 'error',
-          errorMessage: error.message,
-        },
-      })
+      // Update monitor status
+      try {
+        await prisma.monitor.update({
+          where: { id: monitorId },
+          data: {
+            status: 'error',
+            errorMessage: error.message,
+          },
+        })
+      } catch (updateError: any) {
+        console.error(`Monitor ${monitorId}: Failed to update monitor status:`, updateError)
+      }
 
       throw error
     }

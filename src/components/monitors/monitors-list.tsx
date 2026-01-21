@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { formatDistanceToNow } from 'date-fns'
 import Link from 'next/link'
@@ -18,6 +19,8 @@ interface Monitor {
 }
 
 export function MonitorsList({ monitors, onUpdate }: { monitors: Monitor[]; onUpdate: () => void }) {
+  const [triggering, setTriggering] = useState<Record<string, boolean>>({})
+
   const handleToggle = async (id: string, enabled: boolean) => {
     await fetch(`/api/monitors/${id}`, {
       method: 'PATCH',
@@ -35,6 +38,30 @@ export function MonitorsList({ monitors, onUpdate }: { monitors: Monitor[]; onUp
       credentials: 'include',
     })
     onUpdate()
+  }
+
+  const handleTrigger = async (id: string) => {
+    setTriggering({ ...triggering, [id]: true })
+    try {
+      const res = await fetch(`/api/monitors/${id}/trigger`, {
+        method: 'POST',
+        credentials: 'include',
+      })
+      const data = await res.json()
+      if (res.ok) {
+        alert('Monitor triggered! Check the Results page in a few moments.')
+        // Refresh after a short delay to show updated status
+        setTimeout(() => {
+          onUpdate()
+        }, 2000)
+      } else {
+        alert(data.error || 'Failed to trigger monitor')
+      }
+    } catch (error) {
+      alert('An error occurred while triggering the monitor')
+    } finally {
+      setTriggering({ ...triggering, [id]: false })
+    }
   }
 
   if (monitors.length === 0) {
@@ -87,7 +114,32 @@ export function MonitorsList({ monitors, onUpdate }: { monitors: Monitor[]; onUp
                   </p>
                 )}
                 {monitor.errorMessage && (
-                  <p className="text-red-600">Error: {monitor.errorMessage}</p>
+                  <div className={`mt-2 p-3 border rounded ${
+                    monitor.errorMessage.includes('Rate limit') 
+                      ? 'bg-yellow-50 border-yellow-200' 
+                      : 'bg-red-50 border-red-200'
+                  }`}>
+                    <p className={`font-medium ${
+                      monitor.errorMessage.includes('Rate limit') 
+                        ? 'text-yellow-800' 
+                        : 'text-red-800'
+                    }`}>
+                      {monitor.errorMessage.includes('Rate limit') ? '⚠️ ' : 'Error: '}
+                      {monitor.errorMessage}
+                    </p>
+                    {monitor.errorMessage.includes('GitHub token') && (
+                      <p className="text-sm text-red-600 mt-1">
+                        <Link href="/settings" className="underline">
+                          Add your GitHub token in Settings
+                        </Link>
+                      </p>
+                    )}
+                    {monitor.errorMessage.includes('Rate limit') && (
+                      <p className="text-sm text-yellow-700 mt-1">
+                        The monitor will automatically resume when the rate limit resets. You can also try "Run Now" after waiting a few minutes.
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -97,6 +149,15 @@ export function MonitorsList({ monitors, onUpdate }: { monitors: Monitor[]; onUp
                   View
                 </Button>
               </Link>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleTrigger(monitor.id)}
+                disabled={triggering[monitor.id] || !monitor.enabled}
+                title={!monitor.enabled ? 'Enable the monitor first' : 'Run search now'}
+              >
+                {triggering[monitor.id] ? 'Running...' : 'Run Now'}
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
