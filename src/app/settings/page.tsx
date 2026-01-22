@@ -98,7 +98,7 @@ export default function SettingsPage() {
       const key = subscription.getKey('p256dh')
       const auth = subscription.getKey('auth')
       
-      await fetch('/api/notifications/subscribe', {
+      const subscribeRes = await fetch('/api/notifications/subscribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -111,8 +111,16 @@ export default function SettingsPage() {
         }),
       })
 
+      if (!subscribeRes.ok) {
+        const error = await subscribeRes.json()
+        console.error('Failed to save subscription:', error)
+        throw new Error(error.error || 'Failed to save subscription')
+      }
+
+      const result = await subscribeRes.json()
+      console.log('Push notification subscription saved:', result)
       setPushSubscribed(true)
-      setMessage('Push notifications enabled')
+      setMessage('Push notifications enabled successfully! You will now receive notifications for high-severity results.')
     } catch (error) {
       console.error('Error enabling push:', error)
       alert('Failed to enable push notifications')

@@ -19,8 +19,10 @@ export async function POST(request: NextRequest) {
     const body = await request.json()
     const { endpoint, keys } = subscribeSchema.parse(body)
 
+    console.log(`[Subscribe] Saving push subscription for user ${user.id}, endpoint: ${endpoint.substring(0, 50)}...`)
+
     // Upsert subscription
-    await prisma.pushSubscription.upsert({
+    const subscription = await prisma.pushSubscription.upsert({
       where: {
         userId_endpoint: {
           userId: user.id,
@@ -40,12 +42,15 @@ export async function POST(request: NextRequest) {
       },
     })
 
-    return NextResponse.json({ message: 'Subscription saved' })
+    console.log(`[Subscribe] ✅ Subscription saved successfully: ${subscription.id}`)
+
+    return NextResponse.json({ message: 'Subscription saved', subscriptionId: subscription.id })
   } catch (error: any) {
     if (error instanceof z.ZodError) {
+      console.error('[Subscribe] Validation error:', error.errors)
       return NextResponse.json({ error: error.errors }, { status: 400 })
     }
-    console.error('Subscribe error:', error)
+    console.error('[Subscribe] Error saving subscription:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

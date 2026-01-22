@@ -267,6 +267,7 @@ const worker = new Worker(
 
           // Send notification if severity meets threshold
           if (severityResult.severity >= monitor.notificationThreshold) {
+            console.log(`Monitor ${monitorId}: Result severity ${severityResult.severity} meets threshold ${monitor.notificationThreshold}, queuing notification`)
             await notificationQueue.add('send-push', {
               userId: monitor.userId,
               resultId: dbResult.id,
@@ -275,6 +276,9 @@ const worker = new Worker(
               repository: result.repository,
               url: result.url,
             })
+            console.log(`Monitor ${monitorId}: Notification job queued for result ${dbResult.id}`)
+          } else {
+            console.log(`Monitor ${monitorId}: Result severity ${severityResult.severity} below threshold ${monitor.notificationThreshold}, skipping notification`)
           }
         } catch (error: any) {
           // Handle unique constraint violation (race condition)
@@ -383,14 +387,30 @@ const worker = new Worker(
 const notificationWorker = new Worker(
   'notifications',
   async (job) => {
+    console.log(`[Notification Worker] Processing notification job ${job.id}`)
     const { userId, resultId, severity, title, repository, url } = job.data
-    await sendPushNotification(userId, resultId, severity, title, repository, url)
+    try {
+      await sendPushNotification(userId, resultId, severity, title, repository, url)
+      console.log(`[Notification Worker] ✅ Completed notification job ${job.id}`)
+    } catch (error: any) {
+      console.error(`[Notification Worker] ❌ Failed to process notification job ${job.id}:`, error)
+      throw error
+    }
   },
   {
     connection: redisConnection,
     concurrency: 10,
   }
 )
+
+// Log notification worker events
+notificationWorker.on('completed', (job) => {
+  console.log(`[Notification Worker] Job ${job.id} completed`)
+})
+
+notificationWorker.on('failed', (job, err) => {
+  console.error(`[Notification Worker] Job ${job?.id} failed:`, err)
+})
 
 /**
  * Schedules a monitor to run at its next interval

@@ -21,8 +21,10 @@ export async function sendPushNotification(
   repository: string,
   url: string
 ) {
+  console.log(`[Notification] Attempting to send push notification for user ${userId}, result ${resultId}, severity ${severity}`)
+  
   if (!vapidPublicKey || !vapidPrivateKey) {
-    console.warn('VAPID keys not configured, skipping push notification')
+    console.error('[Notification] VAPID keys not configured! Set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in .env')
     return
   }
 
@@ -31,8 +33,10 @@ export async function sendPushNotification(
     where: { userId },
   })
 
+  console.log(`[Notification] Found ${subscriptions.length} subscription(s) for user ${userId}`)
+
   if (subscriptions.length === 0) {
-    console.log(`No push subscriptions for user ${userId}`)
+    console.warn(`[Notification] No push subscriptions for user ${userId}. User needs to enable push notifications in Settings.`)
     return
   }
 
@@ -93,7 +97,7 @@ export async function sendPushNotification(
         },
       })
 
-      console.log(`Push notification sent to user ${userId}`)
+      console.log(`[Notification] ✅ Push notification sent successfully to user ${userId} for result ${resultId}`)
     } catch (error: any) {
       console.error(`Failed to send push notification:`, error)
 
